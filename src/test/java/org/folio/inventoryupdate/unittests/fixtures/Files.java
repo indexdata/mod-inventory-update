@@ -33,7 +33,8 @@ public class Files {
   private static final String INSTANCE_TYPE_ID = "30fffe0e-e985-4144-b2e2-1e8179bdb41f";
 
   public static final String XML_INVENTORY_RECORD_SET = getSampleFile("samplesourcefiles/inventoryRecordSet.xml");
-  public static final String TWO_XML_INVENTOR_RECORD_SETS = getSampleFile("samplesourcefiles/twoInventoryRecordSets.xml");
+  public static final String TWO_XML_INVENTORY_RECORD_SETS = getSampleFile("samplesourcefiles/twoInventoryRecordSets.xml");
+  public static final String TWO_IRS_ONE_MISSING_INSTANCE = getSampleFile("samplesourcefiles/twoIrsOneMissingInstance.xml");
   public static final String XML_MARC_XML = getSampleFile("samplesourcefiles/marc3.xml");
   public static final String XML_MARC_XML_V2 = getSampleFile("samplesourcefiles/marc3v2.xml");
   public static final JsonObject JSON_TRANSFORMATION_CONFIG = new JsonObject(Objects.requireNonNull(getSampleFile("configs/transformation.json")));
@@ -76,7 +77,7 @@ public class Files {
    * @return a number of XML records (total records = lastRecord - firstRecord)
    */
   public static String createCollectionOfInventoryXmlRecordsWithDeletes(int firstRecord, int lastRecord, String fakedResponseStatus, int ... deletesPositions)  {
-      CollectionOfXmlRecords collection = new CollectionOfXmlRecords();
+      CollectionOfXmlRecords collection = new CollectionOfXmlRecords(lastRecord-firstRecord+1);
       for (int i=firstRecord; i<=lastRecord; i++) {
           if (arrayHasInt(deletesPositions, i)) {
               collection.addDeleteRecord(i);
@@ -92,7 +93,7 @@ public class Files {
   }
 
   public static String createCollectionOfOneDeleteRecord(int hrid) {
-      CollectionOfXmlRecords collection = new CollectionOfXmlRecords();
+      CollectionOfXmlRecords collection = new CollectionOfXmlRecords(1);
       collection.addDeleteRecord(hrid);
       return collection.asXmlString();
   }
@@ -101,12 +102,13 @@ public class Files {
 
       Document collection;
       ArrayList<Element> records = new ArrayList<>();
-      public CollectionOfXmlRecords() {
+      public CollectionOfXmlRecords(int count) {
           try {
               DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
               DocumentBuilder builder = factory.newDocumentBuilder();
               collection = builder.newDocument();
               Element root = collection.createElement("collection");
+              root.setAttribute("count", String.valueOf(count));
               collection.appendChild(root);
           } catch (ParserConfigurationException pce) {
               throw new RuntimeException(pce);

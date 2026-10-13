@@ -3,10 +3,6 @@ package org.folio.inventoryupdate.importing.service.delivery.fileimport;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
-import java.io.File;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.util.UUID;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -31,7 +27,7 @@ public class XmlFileProcessor extends FileProcessor {
 
   public static final Logger logger = LogManager.getLogger("ImportJob");
   XmlTransformationPipeline transformationPipeline;
-  RecordReceiver inventoryBatchUpdater;
+  InventoryBatchUpdater inventoryBatchUpdater;
   final Vertx vertx;
 
   public XmlFileProcessor(Vertx vertx, String tenant, UUID channelId) {
@@ -51,7 +47,7 @@ public class XmlFileProcessor extends FileProcessor {
    */
   public Future<XmlFileProcessor> withProcessingPipeline(String tenant, UUID channelId, Vertx vertx,
                                                          InventoryBatchUpdater inventoryBatchUpdater) {
-    return configStorage.getEntity(channelId, new Channel())
+    return new Channel().withTenant(tenant).getById(channelId, configStorage)
         .map(cfg -> ((Channel) cfg).getTransformationId())
         .compose(transformationId -> XmlTransformationPipeline.create(vertx, tenant, transformationId))
         .compose(pipelineCreated -> {
@@ -65,7 +61,7 @@ public class XmlFileProcessor extends FileProcessor {
   }
 
   private Future<XmlFileProcessor> withJobLog(UUID channelId) {
-    return configStorage.getEntity(channelId, new Channel())
+    return new Channel().withTenant(tenant).getById(channelId, configStorage)
         .compose(channel -> {
           importJob = new ImportJob().initiate((Channel) channel.withCreatingUser(null));
           return configStorage.storeEntity(importJob);
@@ -84,23 +80,27 @@ public class XmlFileProcessor extends FileProcessor {
    * @param xmlFile an XML file containing a `collection` of 0 or more `record`s
    * @return future completion of the file import
    */
-  public Future<Void> processFile(File xmlFile) {
+  public Future<Void> processFile(SourceFile xmlFile) {
     Promise<Void> promise = Promise.promise();
     try {
       reporting.nowProcessing(xmlFile.getName());
-      String xmlFileContents = Files.readString(xmlFile.toPath(), StandardCharsets.UTF_8);
-      vertx.executeBlocking(new XmlRecordsReader(xmlFileContents, transformationPipeline), true)
+      Future<Void> fileFinished = inventoryBatchUpdater.startFile();
+      vertx.executeBlocking(new XmlRecordsReader(xmlFile, transformationPipeline), true)
+          .compose(na -> fileFinished)
           .onComplete(processing -> {
             if (processing.succeeded()) {
               promise.complete();
             } else {
               logger.error("Processing failed with {}", processing.cause().getMessage());
-              halt("Processing of " + xmlFile.getName() + " failed with "
-                  + processing.cause().getMessage());
+              if (!paused()) {
+                halt("Processing of " + xmlFile.getName() + " failed with "
+                    + processing.cause().getMessage());
+              }
+              inventoryBatchUpdater.failCurrentFile(processing.cause());
               promise.complete();
             }
           });
-    } catch (IOException e) {
+    } catch (Exception e) {
       promise.fail("Could not open XML source file for importing " + e.getMessage());
     }
     return promise.future();
@@ -112,10 +112,14 @@ public class XmlFileProcessor extends FileProcessor {
         + ".";
     if (transformationPipeline.getRecordsProcessed() > 0 && inventoryBatchUpdater.getRecordsProcessed() > 0) {
       stats += " Transformation: "
-          + (transformationPipeline.getRecordsProcessed() * 1000000000L / transformationPipeline.getProcessingTime())
+          + (transformationPipeline.getProcessingTime() > 0
+          ? (transformationPipeline.getRecordsProcessed() * 1000000000L / transformationPipeline.getProcessingTime())
+          : " - ")
           + " recs/s."
           + " Upserting: "
-          + (inventoryBatchUpdater.getRecordsProcessed() * 1000000000L / inventoryBatchUpdater.getProcessingTime())
+          + (inventoryBatchUpdater.getProcessingTime() > 0
+          ? (inventoryBatchUpdater.getRecordsProcessed() * 1000000000L / inventoryBatchUpdater.getProcessingTime())
+          : " - ")
           + " recs/s.";
     }
     return stats;

@@ -10,9 +10,11 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.folio.inventoryupdate.importing.moduledata.Channel;
 import org.folio.inventoryupdate.importing.moduledata.ImportJob;
+import org.folio.inventoryupdate.importing.moduledata.database.Entity;
 import org.folio.inventoryupdate.importing.moduledata.database.EntityStorage;
 import org.folio.inventoryupdate.importing.moduledata.database.SqlQuery;
 import org.folio.inventoryupdate.importing.moduledata.database.Tables;
+import org.folio.inventoryupdate.importing.service.ImportService;
 import org.folio.inventoryupdate.importing.service.ServiceRequest;
 import org.folio.inventoryupdate.importing.service.delivery.fileimport.FileListener;
 import org.folio.inventoryupdate.importing.service.delivery.fileimport.FileListeners;
@@ -30,10 +32,7 @@ public final class Channels extends EntityResponses {
     Channel channel = new Channel().fromJson(request.bodyAsJson());
     EntityStorage db = request.entityStorage();
     return db.storeEntity(channel.withCreatingUser(request.currentUser()))
-        .map(id -> {
-          FileQueue.get(request, id.toString()).createDirectoriesIfNotExist();
-          return id;
-        }).compose(id -> db.getEntity(id, channel)).compose(cfg -> {
+        .compose(id -> channel.withTenant(request.tenant()).getById(id, db)).compose(cfg -> {
           if (((Channel) cfg).isEnabled()) {
             return FileListeners.deployIfNotDeployed(request, (Channel) cfg).map(na -> cfg)
                 .compose(na -> responseJson(request.routingContext(), 201).end(cfg.asJson().encodePrettily()))
@@ -50,15 +49,21 @@ public final class Channels extends EntityResponses {
 
   public static Future<Void> getChannelById(ServiceRequest request) {
     UUID id = UUID.fromString(request.requestParam("id"));
-    Channel entity = new Channel();
-    return request.entityStorage().getEntity(id, entity).onSuccess(instance -> {
+    Entity entity = new Channel().withTenant(request.tenant());
+    return entity.getById(request).compose(instance -> {
       if (instance == null) {
-        responseText(request.routingContext(), 404).end(entity.entityName() + " " + id + " not found.");
+        return responseText(request.routingContext(), 404).end(entity.entityName() + " " + id + " not found.");
       } else {
-        Channel channel = ((Channel) instance).withFileQueue(FileQueue.get(request, id.toString()));
-        responseJson(request.routingContext(), 200).end(channel.asJson().encodePrettily());
+        Channel channel = (Channel) instance;
+        FileQueue fq = ImportService.getFileQueue(request, id);
+        return fq.nameOfFileInProcess()
+            .map(channel::withNameOfProcessingFile)
+            .compose(na -> fq.size()
+                .map(channel::withLengthOfQueue)
+                .compose(x ->
+                    responseJson(request.routingContext(), 200).end(channel.asJson().encodePrettily())));
       }
-    }).mapEmpty();
+    });
   }
 
   public static Future<Void> putChannel(ServiceRequest request) {
@@ -67,12 +72,11 @@ public final class Channels extends EntityResponses {
     return request.entityStorage().updateEntity(id, inputChannel.withUpdatingUser(request.currentUser()))
         .compose(result -> {
           if (result.rowCount() == 1) {
-            return request.entityStorage()
-                .getEntity(id, new Channel())
+            return new Channel().withTenant(request.tenant()).getById(request)
                 .map(Channel.class::cast)
                 .compose(channel -> {
                   if (channel.isEnabled() && channel.isCommissioned()) {
-                    FileListeners.getFileListener(request.tenant(), id.toString()).updateChannel(channel);
+                    FileListeners.getFileListener(request.tenant(), id).updateChannel(channel);
                     return Future.succeededFuture();
                   } else if (!channel.isEnabled() && channel.isCommissioned()) {
                     return FileListeners.undeployIfDeployed(request, channel);
@@ -152,7 +156,7 @@ public final class Channels extends EntityResponses {
       if (channel != null) {
         return channel.setListening(true, request.entityStorage())
             .compose(na -> {
-              FileListener listener = FileListeners.getFileListener(request.tenant(), channel.getId().toString());
+              FileListener listener = FileListeners.getFileListener(request.tenant(), channel.getId());
               if (listener != null) {
                 listener.updateChannel(channel);
               }
@@ -173,7 +177,7 @@ public final class Channels extends EntityResponses {
       if (channel != null) {
         return channel.setListening(false, request.entityStorage())
             .compose(na -> {
-              FileListener listener = FileListeners.getFileListener(request.tenant(), channel.getId().toString());
+              FileListener listener = FileListeners.getFileListener(request.tenant(), channel.getId());
               if (listener != null) {
                 listener.updateChannel(channel);
               }
@@ -192,7 +196,7 @@ public final class Channels extends EntityResponses {
     EntityStorage db = request.entityStorage();
     SqlQuery queryFromCql = new Channel().cqlToSql(
         channelIdentifier.length() > 24 ? "id==" + channelIdentifier : "tag==" + channelIdentifier, "0", "1",
-        db.schemaDotTable(Tables.CHANNEL), new Channel().getQueryableFields());
+        request.dbSchema(), Tables.CHANNEL.name(), new Channel().getQueryableFields());
     return db.getEntities(queryFromCql.getQueryWithLimits(), new Channel()).map(entities -> {
       if (entities.isEmpty()) {
         return null;
@@ -205,7 +209,7 @@ public final class Channels extends EntityResponses {
   public static Future<List<Channel>> getDeployableChannels(ServiceRequest request) {
     EntityStorage db = request.entityStorage();
     SqlQuery queryFromCql = new Channel().cqlToSql("enabled==true", "0", "100",
-        db.schemaDotTable(Tables.CHANNEL), new Channel().getQueryableFields());
+        request.dbSchema(), Tables.CHANNEL.name(), new Channel().getQueryableFields());
     return db.getEntities(queryFromCql.getQueryWithLimits(), new Channel())
         .compose(entities -> {
           List<Channel> deployableChannels = entities.stream().map(Channel.class::cast)
@@ -237,12 +241,13 @@ public final class Channels extends EntityResponses {
     }
   }
 
-  public static Future<Void> initFileSystemQueue(ServiceRequest request) {
+  public static Future<Void> initFileQueue(ServiceRequest request) {
     String channelId = request.requestParam("id");
     return getChannelByTagOrUuid(request, channelId).compose(channel -> {
       if (channel != null) {
-        String initMessage = FileQueue.get(request, channelId).initialize();
-        return responseText(request.routingContext(), 200).end(initMessage).mapEmpty();
+        return ImportService.getFileQueue(request, channel.getId())
+            .initialize(false)
+            .compose(initMessage -> responseText(request.routingContext(), 200).end(initMessage).mapEmpty());
       } else {
         return responseText(request.routingContext(), 404)
             .end("Could not find channel [" + channelId + "].").mapEmpty();

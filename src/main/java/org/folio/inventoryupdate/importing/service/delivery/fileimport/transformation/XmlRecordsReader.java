@@ -12,6 +12,7 @@ import org.folio.inventoryupdate.importing.service.delivery.fileimport.Processin
 import org.folio.inventoryupdate.importing.service.delivery.fileimport.ProcessingRecord;
 import org.folio.inventoryupdate.importing.service.delivery.fileimport.RecordProvider;
 import org.folio.inventoryupdate.importing.service.delivery.fileimport.RecordReceiver;
+import org.folio.inventoryupdate.importing.service.delivery.fileimport.SourceFile;
 import org.folio.inventoryupdate.importing.utils.EncodeXmlText;
 import org.folio.inventoryupdate.importing.utils.SecureSaxParser;
 import org.xml.sax.Attributes;
@@ -25,6 +26,10 @@ public class XmlRecordsReader extends DefaultHandler implements RecordProvider, 
   StringBuilder theCollectionElement = new StringBuilder();
   RecordReceiver target;
   final String xmlCollectionOfRecords;
+
+  public XmlRecordsReader(SourceFile xmlFile, RecordReceiver target) throws Exception {
+    this(xmlFile.getPayload(), target);
+  }
 
   public XmlRecordsReader(String recordsSource, RecordReceiver target) {
     this.xmlCollectionOfRecords = recordsSource;
@@ -47,8 +52,10 @@ public class XmlRecordsReader extends DefaultHandler implements RecordProvider, 
     if (localName.equalsIgnoreCase("collection") && theRecord.isEmpty()) {
       theCollectionElement.append("<").append(qualifiedName);
       for (int index = 0; index < attributes.getLength(); index++) {
-        theCollectionElement.append(" ")
-            .append(attributes.getQName(index)).append("=\"").append(attributes.getValue(index)).append("\"");
+        if (!attributes.getQName(index).equals("count")) {
+          theCollectionElement.append(" ")
+              .append(attributes.getQName(index)).append("=\"").append(attributes.getValue(index)).append("\"");
+        }
       }
       theCollectionElement.append(">");
     } else {

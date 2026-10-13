@@ -1,12 +1,14 @@
 package org.folio.inventoryupdate.importing.service.delivery.fileimport;
 
 import io.vertx.core.Future;
+import io.vertx.core.Promise;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.RoutingContext;
 import java.util.ArrayList;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.folio.inventoryupdate.importing.service.delivery.fileimport.reporting.InventoryMetrics;
@@ -20,6 +22,7 @@ public class InventoryBatchUpdater implements RecordReceiver {
   private final ArrayList<ProcessingRecord> records = new ArrayList<>();
   private final InventoryUpdateClient updateClient;
   private final Turnstile turnstile = new Turnstile();
+  private Promise<Void> fileFinished = Promise.promise();
   private long batchNumber;
 
   private long processingTime;
@@ -36,6 +39,16 @@ public class InventoryBatchUpdater implements RecordReceiver {
   public InventoryBatchUpdater forFileProcessor(FileProcessor processor) {
     fileProcessor = processor;
     return this;
+  }
+
+  public Future<Void> startFile() {
+    records.clear();
+    fileFinished = Promise.promise();
+    return fileFinished.future();
+  }
+
+  public void failCurrentFile(Throwable cause) {
+    fileFinished.tryFail(cause);
   }
 
   @Override
@@ -65,6 +78,7 @@ public class InventoryBatchUpdater implements RecordReceiver {
       if (fileProcessor.paused()) {
         logger.info("Skipping remaining pending batch ({} records) because processing has been halted",
             copyOfRecords.size());
+        fileFinished.tryComplete();
       } else {
         releaseBatch(new BatchOfRecords(copyOfRecords, true, batchNumber));
       }
@@ -73,22 +87,36 @@ public class InventoryBatchUpdater implements RecordReceiver {
 
   private void releaseBatch(BatchOfRecords batch) {
     if (!fileProcessor.paused()) {
-      if (turnstile.enterBatch(batch)) {
-        persistBatch().onFailure(na -> {
-          logger.error("Fatal error during upsert. Pausing file processor, skipping pending batches. {}",
-              na.getMessage());
-          // Set job status to paused until resumed.
-          fileProcessor.halt("Fatal error during upsert. Halting processing, skipping pending batches. "
-              + na.getMessage());
-          turnstile.exitBatch();
-        }).onComplete(na -> turnstile.exitBatch());
-      } else {
-        turnstile.exitBatch();
-        logger.error("Something is blocking the process? Could not forward batch for upsert in 60 seconds.");
+      try {
+        if (turnstile.enterBatch(batch)) {
+          persistBatch()
+              .onSuccess(na -> completeFileIfLastBatch(batch))
+              .onFailure(this::handlePersistenceFailure)
+              .onComplete(na -> {
+                try {
+                  BatchOfRecords batchInTurnstile = turnstile.exitBatch();
+                  if (batchInTurnstile == null) {
+                    throw new TimeoutException("Taking out the batch from batch queue of one timed out.");
+                  }
+                } catch (TimeoutException toe) {
+                  handlePersistenceFailure(toe);
+                }
+              });
+        } else {
+          handlePersistenceFailure(new TimeoutException("Could not forward batch for upsert in 90 seconds."));
+        }
+      } catch (TimeoutException toe) {
+        handlePersistenceFailure(toe);
       }
     } else {
       logger.info("Skipping through batch #{} because processing is halted.", batch.getBatchNumber());
-      turnstile.exitBatch();
+      completeFileIfLastBatch(batch);
+    }
+  }
+
+  private void completeFileIfLastBatch(BatchOfRecords batch) {
+    if (batch.isLastBatchOfFile()) {
+      fileFinished.tryComplete();
     }
   }
 
@@ -188,10 +216,35 @@ public class InventoryBatchUpdater implements RecordReceiver {
 
   private void reportEndOfFile() {
     fileProcessor.reporting.endOfFile();
-    boolean queueDone = fileProcessor.fileQueueDone(true);
-    if (queueDone) {
-      fileProcessor.reporting.endOfQueue();
+    fileProcessor.fileQueueDone(true)
+        .onFailure(f -> logger.error("Error checking if file queue done {}", f.getMessage()))
+        .compose(done -> {
+          if (done) {
+            fileProcessor.reporting.endOfQueue();
+          }
+          return Future.succeededFuture(null);
+        });
+  }
+
+  private void handlePersistenceFailure(Throwable cause) {
+    Throwable failure = cause != null
+        ? cause
+        : new IllegalStateException("Batch persistence failed without a cause");
+
+    String detail = failure.getMessage();
+    if (detail == null || detail.isBlank()) {
+      detail = failure.getClass().getSimpleName();
     }
+
+    String message =
+        "Fatal error during upsert. Halting processing, skipping pending batches. "
+            + detail;
+    logger.error(message, failure);
+
+    if (!fileProcessor.paused()) {
+      fileProcessor.halt(message);
+    }
+    failCurrentFile(failure);
   }
 
   /**
@@ -205,22 +258,23 @@ public class InventoryBatchUpdater implements RecordReceiver {
     /**
      * Puts batch in blocking queue-of-one; process waits if previous batch still in queue.
      */
-    private boolean enterBatch(BatchOfRecords batch) {
+    private boolean enterBatch(BatchOfRecords batch) throws TimeoutException {
       try {
-        return gate.offer(batch, 60, TimeUnit.SECONDS);
+        return gate.offer(batch, 90, TimeUnit.SECONDS);
       } catch (InterruptedException ie) {
-        logger.error("Putting next batch in queue-of-one interrupted: {}", ie.getMessage());
+        logger.error("Upsert attempt timed out after 90 seconds.");
         Thread.currentThread().interrupt();
+        throw new TimeoutException("Upsert attempt timed out after 90 seconds.");
       }
-      return false;
     }
 
-    private void exitBatch() {
+    private BatchOfRecords exitBatch() throws TimeoutException {
       try {
-        gate.poll(10, TimeUnit.SECONDS);
+        return gate.poll(10, TimeUnit.SECONDS);
       } catch (InterruptedException ie) {
-        logger.error("Taking batch from queue-of-one interrupted: {}", ie.getMessage());
+        logger.error("Taking batch from queue-of-one timed out after 10 seconds: {}", ie.getMessage());
         Thread.currentThread().interrupt();
+        throw new TimeoutException("Taking batch from queue-of-one failed: " + ie.getMessage());
       }
     }
 

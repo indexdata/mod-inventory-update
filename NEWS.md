@@ -1,3 +1,32 @@
+## 5.2.1 2026-08-10
+
+* [MODINVUP-232](https://issues.folio.org/browse/MODINVUP-232) Remove misleading count on collection element in failed record log
+* [MODINVUP-233](https://issues.folio.org/browse/MODINVUP-233) Fail early on bad XML input to file upload  
+* [MODINVUP-231](https://issues.folio.org/browse/MODINVUP-231) Fix misleading message about failed harvest attempt on file upload
+
+## 5.2.0 2026-08-03
+
+* [MODINVUP-219](https://issues.folio.org/browse/MODINVUP-219) Provide option to harvest source files from remote.
+* [MODINVUP-220](https://issues.folio.org/browse/MODINVUP-220) Use PostgreSQL instead of Vert.x file system for file queues.
+
+## 5.1.3 2026-06-18
+
+* [MODINVUP-216](https://issues.folio.org/browse/MODINVUP-216) Retain source file for resumption after fatal storage error.
+
+## 5.1.2 2026-06-03
+
+* [MODINVUP-187](https://issues.folio.org/browse/MODINVUP-187) Add virtual field `stepName` to GET `tsa` and GET `tsas`.
+* [MODINVUP-187](https://issues.folio.org/browse/MODINVUP-187) Support sorting of job log lines by `timeStamp`.
+* [MODINVUP-195](https://issues.folio.org/browse/MODINVUP-195) Remove null properties from GET step (so it can be PUT too).
+* [MODINVUP-204](https://issues.folio.org/browse/MODINVUP-204) Handle schema violations in transformed inventory record set.
+
+## 5.1.1 2026-05-27
+
+* [MODINVUP-184](https://issues.folio.org/browse/MODINVUP-184), [MODINVUP-207](https://issues.folio.org/browse/MODINVUP-207) implement `loadSample` (MARC, PICA import configs).
+* [MODINVUP-206](https://issues.folio.org/browse/MODINVUP-206) Ensure tenant separation in worker thread clean-up.
+* [MODINVUP-208](https://issues.folio.org/browse/MODINVUP-208) Ensure that a channel JSON that you GET can also be PUT.
+* [MODINVUP-210](https://issues.folio.org/browse/MODINVUP-210) Ensure that primary keys (`id` properties) are immutable.
+
 ## 5.1.0 2026-04-15
 
 * [MODINVUP-191](https://issues.folio.org/browse/MODINVUP-191) Support skipping current file when resuming job
